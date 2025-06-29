@@ -1,0 +1,107 @@
+#pragma kernel CSMain
+#pragma kernel GenerateMesh
+#pragma kernel ComputeMaterialParams
+
+StructuredBuffer<float2> waveBuffer;
+RWStructuredBuffer<float2> nextWaveBuffer;
+RWStructuredBuffer<float3> verticesBuffer;
+RWStructuredBuffer<int> triangleBuffer;
+RWStructuredBuffer<float4x4> matrixBuffer;
+
+uint resolutionX;
+uint resolutionZ;
+float spacing;
+
+float deltaTime;
+float tension;
+float damping;
+float wavelengthFactor;
+float restoreStrength;
+
+[numthreads(16, 16, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= resolutionX || id.y >= resolutionZ)
+		return;
+
+	uint index = id.x + id.y * resolutionX;
+	float2 self = waveBuffer[index];
+
+	float sum = 0;
+	int count = 0;
+
+	if (id.x > 0)
+	{
+		sum += waveBuffer[(id.x - 1) + id.y * resolutionX].x;
+		count++;
+	}
+	if (id.x < resolutionX - 1)
+	{
+		sum += waveBuffer[(id.x + 1) + id.y * resolutionX].x;
+		count++;
+	}
+	if (id.y > 0)
+	{
+		sum += waveBuffer[id.x + (id.y - 1) * resolutionX].x;
+		count++;
+	}
+	if (id.y < resolutionZ - 1)
+	{
+		sum += waveBuffer[id.x + (id.y + 1) * resolutionX].x;
+		count++;
+	}
+
+	float laplacian = (sum - count * self.x);
+	float acceleration = tension * laplacian;
+
+	acceleration += -self.x * restoreStrength;
+	self.y += acceleration * deltaTime * wavelengthFactor;
+	self.y *= damping;
+	self.x += self.y * deltaTime;
+
+	nextWaveBuffer[index] = self;
+}
+
+[numthreads(16, 16, 1)]
+void GenerateMesh(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= resolutionX || id.y > resolutionZ)
+		return;
+	
+	int vertexIndex = id.x + id.y * resolutionX;
+	verticesBuffer[vertexIndex] = float3(id.x * spacing, waveBuffer[vertexIndex].x, id.y * spacing);
+	
+	if (id.x >= resolutionX - 1 || id.y >= resolutionZ - 1)
+		return;
+	
+	int triangleIndex = vertexIndex * 6;
+	triangleBuffer[triangleIndex] = vertexIndex;
+	triangleBuffer[triangleIndex + 1] = vertexIndex + resolutionX;
+	triangleBuffer[triangleIndex + 2] = vertexIndex + 1;
+	triangleBuffer[triangleIndex + 3] = vertexIndex + 1;
+	triangleBuffer[triangleIndex + 4] = vertexIndex + resolutionX;
+	triangleBuffer[triangleIndex + 5] = vertexIndex + resolutionX + 1;
+}
+
+[numthreads(16, 16, 1)]
+void ComputeMaterialParams(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= resolutionX || id.y > resolutionZ)
+		return;
+	
+	int index = id.x + id.y * resolutionX;
+	float2 wave = waveBuffer[index];
+	float height = wave.x;
+
+	float3 pos = float3(id.x * spacing, height, id.y * spacing);
+	float4x4 matr =
+	{
+		float4(1, 0, 0, 0),
+        float4(0, 1, 0, 0),
+        float4(0, 0, 1, 0),
+        float4(pos, 1)
+	};
+
+
+	matrixBuffer[index] = matr;
+}
