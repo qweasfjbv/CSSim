@@ -2,7 +2,7 @@ using Sim.Util;
 using System.Collections.Generic;
 using UnityEngine;
 
-namespace Sim
+namespace Sim.Wave
 {
 	public class WaveCPU : MonoBehaviour
 	{
@@ -19,39 +19,28 @@ namespace Sim
 
 		public float fixedDeltaTime = 0.05f;
 
-		private ComputeBuffer matrixBuffer;
-
 		private WavePoint[] currentWavePoints;
 		private WavePoint[] nextWavePoints;
-		private Matrix4x4[] matrices;
 
 		public int Count { get => resolutionX * resolutionZ; }
 		
 		void Start()
 		{
 			InitArrays();
-			InitBuffers();
 			InitShaders();
 		}
 
 		void Update()
 		{
 			UpdateWaveCPU();
-			UpdateMaterialParamsCPU();
 			GenerateMeshCPU();
 			GenerateImpulse();
 		}
 
 		private void InitArrays()
 		{
-			matrices = new Matrix4x4[Count];
 			currentWavePoints = new WavePoint[Count];
 			nextWavePoints = new WavePoint[Count];
-		}
-
-		private void InitBuffers()
-		{
-			matrixBuffer = new ComputeBuffer(Count, sizeof(float) * 16, ComputeBufferType.Default);
 		}
 
 		private void InitShaders()
@@ -108,20 +97,6 @@ namespace Sim
 			nextWavePoints = tmpPoints;
 		}
 
-		private void UpdateMaterialParamsCPU()
-		{
-			for (int z = 0; z < resolutionZ; z++)
-				for (int x = 0; x < resolutionX; x++)
-				{
-					int i = x + z * resolutionX;
-					Vector3 pos = new Vector3(x * spacing, currentWavePoints[i].height, z * spacing);
-					matrices[i] = Matrix4x4.TRS(pos, Quaternion.identity, Vector3.one);
-				}
-
-			matrixBuffer.SetData(matrices);
-			material.SetBuffer("matrixBuffer", matrixBuffer);
-		}
-
 		private void GenerateMeshCPU()
 		{
 			Vector3[] vertices = new Vector3[resolutionX * resolutionZ];
@@ -176,9 +151,5 @@ namespace Sim
 			currentWavePoints[centerIdx].velocity += impulseStrength;
 		}
 
-		void OnDestroy()
-		{
-			matrixBuffer?.Dispose();
-		}
 	}
 }

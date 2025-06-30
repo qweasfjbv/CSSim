@@ -1,0 +1,135 @@
+#pragma kernel ComputeWave
+#pragma kernel GenerateMesh
+#pragma kernel ComputeNormal
+#pragma kernel NormalizeNormal
+
+#define NUMTHREAD 16
+
+StructuredBuffer<float2> waveBuffer;
+RWStructuredBuffer<float2> nextWaveBuffer;
+RWStructuredBuffer<float3> verticesBuffer;
+RWStructuredBuffer<int> triangleBuffer;
+RWStructuredBuffer<int3> intNormalBuffer;
+RWStructuredBuffer<float3> normalBuffer;
+
+uint resolutionX;
+uint resolutionZ;
+float spacing;
+
+float deltaTime;
+float tension;
+float damping;
+float wavelengthFactor;
+float restoreStrength;
+
+[numthreads(NUMTHREAD, NUMTHREAD, 1)]
+void ComputeWave(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= resolutionX || id.y >= resolutionZ)
+		return;
+
+	uint index = id.x + id.y * resolutionX;
+	float2 self = waveBuffer[index];
+
+	float sum = 0;
+	int count = 0;
+
+	if (id.x > 0)
+	{
+		sum += waveBuffer[(id.x - 1) + id.y * resolutionX].x;
+		count++;
+	}
+	if (id.x < resolutionX - 1)
+	{
+		sum += waveBuffer[(id.x + 1) + id.y * resolutionX].x;
+		count++;
+	}
+	if (id.y > 0)
+	{
+		sum += waveBuffer[id.x + (id.y - 1) * resolutionX].x;
+		count++;
+	}
+	if (id.y < resolutionZ - 1)
+	{
+		sum += waveBuffer[id.x + (id.y + 1) * resolutionX].x;
+		count++;
+	}
+
+	float laplacian = (sum - count * self.x);
+	float acceleration = tension * laplacian;
+
+	acceleration += -self.x * restoreStrength;
+	self.y += acceleration * deltaTime * wavelengthFactor;
+	self.y *= damping;
+	self.x += self.y * deltaTime;
+
+	nextWaveBuffer[index] = self;
+}
+
+[numthreads(NUMTHREAD, NUMTHREAD, 1)]
+void GenerateMesh(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= resolutionX || id.y > resolutionZ)
+		return;
+	
+	int vertexIndex = id.x + id.y * resolutionX;
+	intNormalBuffer[vertexIndex] = 0;
+	verticesBuffer[vertexIndex] = float3(id.x * spacing, waveBuffer[vertexIndex].x, id.y * spacing);
+	
+	if (id.x >= resolutionX - 1 || id.y >= resolutionZ - 1)
+		return;
+	
+	int triangleIndex = vertexIndex * 6;
+	triangleBuffer[triangleIndex] = vertexIndex;
+	triangleBuffer[triangleIndex + 1] = vertexIndex + resolutionX;
+	triangleBuffer[triangleIndex + 2] = vertexIndex + 1;
+	triangleBuffer[triangleIndex + 3] = vertexIndex + 1;
+	triangleBuffer[triangleIndex + 4] = vertexIndex + resolutionX;
+	triangleBuffer[triangleIndex + 5] = vertexIndex + resolutionX + 1;
+}
+
+void InterlockedAddInt3(int index, float3 value, float weight)
+{
+	int3 ivalue = (int3) (value * weight);
+	InterlockedAdd(intNormalBuffer[index].x, ivalue.x);
+	InterlockedAdd(intNormalBuffer[index].y, ivalue.y);
+	InterlockedAdd(intNormalBuffer[index].z, ivalue.z);
+}
+
+[numthreads(NUMTHREAD, NUMTHREAD, 1)]
+void ComputeNormal(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= resolutionX - 1 || id.y >= resolutionZ - 1)
+		return;
+	
+	int vertexIndex = id.x + id.y * resolutionX;
+	
+	float3 edge1 = verticesBuffer[vertexIndex + resolutionX] - verticesBuffer[vertexIndex];
+	float3 edge2 = verticesBuffer[vertexIndex + 1] - verticesBuffer[vertexIndex];
+	float3 faceNormal = normalize(cross(edge1, edge2));
+
+	InterlockedAddInt3(vertexIndex, faceNormal, 100);
+	InterlockedAddInt3(vertexIndex + resolutionX, faceNormal, 100);
+	InterlockedAddInt3(vertexIndex + 1, faceNormal, 100);
+	
+	edge1 = verticesBuffer[vertexIndex + resolutionX] - verticesBuffer[vertexIndex + 1];
+	edge2 = verticesBuffer[vertexIndex + resolutionX + 1] - verticesBuffer[vertexIndex + 1];
+	faceNormal = normalize(cross(edge1, edge2));
+	
+	InterlockedAddInt3(vertexIndex + 1, faceNormal, 100);
+	InterlockedAddInt3(vertexIndex + resolutionX, faceNormal, 100);
+	InterlockedAddInt3(vertexIndex + resolutionX + 1, faceNormal, 100);
+}
+
+[numthreads(NUMTHREAD, NUMTHREAD, 1)]
+void NormalizeNormal(uint3 id : SV_DispatchThreadID)
+{
+	if (id.x >= resolutionX || id.y > resolutionZ)
+		return;
+	
+	int index = id.x + id.y * resolutionX;
+	float3 normal = (float3) intNormalBuffer[index];
+	float sqrMag = dot(normal, normal);
+	
+	normalBuffer[index] = sqrMag > 0.001f ? normal / sqrt(sqrMag) : 0;
+}
