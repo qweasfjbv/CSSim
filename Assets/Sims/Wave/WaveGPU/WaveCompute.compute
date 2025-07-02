@@ -79,7 +79,8 @@ void GenerateMesh(uint3 id : SV_DispatchThreadID)
 	if (id.x >= resolutionX - 1 || id.y >= resolutionZ - 1)
 		return;
 	
-	int triangleIndex = vertexIndex * 6;
+	int indIndex = id.x + id.y * (resolutionX - 1);
+	int triangleIndex = indIndex * 6;
 	triangleBuffer[triangleIndex] = vertexIndex;
 	triangleBuffer[triangleIndex + 1] = vertexIndex + resolutionX;
 	triangleBuffer[triangleIndex + 2] = vertexIndex + 1;

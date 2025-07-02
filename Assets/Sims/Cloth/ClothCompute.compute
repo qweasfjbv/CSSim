@@ -1,0 +1,225 @@
+#pragma kernel ExternalForces
+#pragma kernel ComputeParticles
+#pragma kernel ConstraintCorrection;
+#pragma kernel CollisionCheck;
+#pragma kernel GenerateMesh
+#pragma kernel ComputeNormal
+#pragma kernel NormalizeNormal
+
+#define THREAD_SIZE 16
+
+static const int2 neighborOffsets[8] =
+{
+	int2(1, 0), int2(-1, 0),
+    int2(0, 1), int2(0, -1),
+    int2(1, 1), int2(-1, 1),
+    int2(1, -1), int2(-1, -1)
+};
+
+StructuredBuffer<float3> positionBufferRead;
+StructuredBuffer<float3> prevPositionBufferRead;
+RWStructuredBuffer<float3> positionBufferWrite;
+RWStructuredBuffer<float3> prevPositionBufferWrite;
+
+RWStructuredBuffer<int3> intNormalBuffer;
+RWStructuredBuffer<float3> normalBuffer;
+RWStructuredBuffer<float3> accelBuffer;
+RWStructuredBuffer<int> indicesBuffer;
+StructuredBuffer<int> isFixedBuffer;
+
+int resolutionX;
+int resolutionY;
+
+float deltaTime;
+float damping;
+float stiffness;
+float gravity;
+float spacing;
+float time;
+
+float3 boxMin;
+float3 boxMax;
+
+[numthreads(THREAD_SIZE, THREAD_SIZE, 1)]
+void ExternalForces(uint3 id : SV_DispatchThreadID)
+{
+	if ((int) id.x >= resolutionX || (int) id.y >= resolutionY)
+		return;
+	int index = id.x + id.y * resolutionX;
+	
+	float3 wind = float3(0, 0, sin(time * 2 + id.x * 0.2) * 0.3);
+	accelBuffer[index] += wind;
+}
+
+[numthreads(THREAD_SIZE, THREAD_SIZE, 1)]
+void ComputeParticles(uint3 id : SV_DispatchThreadID)
+{
+	if ((int) id.x >= resolutionX || (int) id.y >= resolutionY)
+        return;
+
+	int index = id.x + id.y * resolutionX;
+	float3 pos = positionBufferRead[index];
+	
+	if (isFixedBuffer[index] != 0)
+	{
+		prevPositionBufferWrite[index] = pos;
+		positionBufferWrite[index] = pos;
+		return;
+	}
+	
+	float3 prev = prevPositionBufferRead[index];
+	float3 accel = float3(0, gravity, 0) + accelBuffer[index];
+
+	// verlet integration
+	float3 newPos = pos + (pos - prev) * damping + accel * deltaTime * deltaTime;
+	
+	prevPositionBufferWrite[index] = pos;
+	positionBufferWrite[index] = newPos;
+	
+	accelBuffer[index] = float3(0, 0, 0);
+}
+
+
+[numthreads(THREAD_SIZE, THREAD_SIZE, 1)]
+void ConstraintCorrection(uint3 id : SV_DispatchThreadID)
+{
+	if ((int) id.x >= resolutionX || (int) id.y >= resolutionY)
+		return;
+	
+	int index = id.x + id.y * resolutionX;
+	
+	if (isFixedBuffer[index] != 0)
+		return;
+	
+	float maxCorrectionLength = spacing * 0.5f;
+	float3 pos = positionBufferWrite[index];
+	for (int i = 0; i < 8; ++i)
+	{
+		int2 offset = neighborOffsets[i];
+		int2 n = int2((int) id.x, (int) id.y) + int2(offset.x, offset.y);
+		if (n.x < 0 || n.y < 0 || n.x >= resolutionX || n.y >= resolutionY)
+			continue;
+
+		int neighborIndex = n.x + n.y * resolutionX;
+		float3 neighborPos = positionBufferWrite[neighborIndex];
+
+		float3 dir = pos - neighborPos;
+		float dist = length(dir);
+		
+		if (dist > 0.001f)
+		{
+			float targetLength = spacing;
+			if (abs(offset.x) + abs(offset.y) == 2)
+				targetLength *= 1.4142f;
+
+			float diff = (dist - targetLength);
+			float3 correction = stiffness * diff * dir * 0.5f;
+			if (length(correction) > maxCorrectionLength)
+				correction = normalize(correction) * maxCorrectionLength;
+			
+			positionBufferWrite[index] -= isFixedBuffer[neighborIndex] == 0 ? correction : .5f * correction;
+		}
+	}
+}
+
+[numthreads(THREAD_SIZE, THREAD_SIZE, 1)]
+void CollisionCheck(uint3 id : SV_DispatchThreadID)
+{
+	if ((int) id.x >= resolutionX || (int) id.y >= resolutionY)
+		return;
+	
+	int index = id.x + id.y * resolutionX;
+	float3 pos = positionBufferWrite[index];
+
+	if (pos.x > boxMin.x && pos.x < boxMax.x &&
+    pos.y > boxMin.y && pos.y < boxMax.y &&
+    pos.z > boxMin.z && pos.z < boxMax.z)
+	{
+		float3 toMin = pos - boxMin;
+		float3 toMax = boxMax - pos;
+
+		float3 penetration;
+		penetration.x = (toMin.x < toMax.x) ? -(toMin.x) : toMax.x;
+		penetration.y = (toMin.y < toMax.y) ? -(toMin.y) : toMax.y;
+		penetration.z = (toMin.z < toMax.z) ? -(toMin.z) : toMax.z;
+		
+		float3 absPen = abs(penetration);
+		if (absPen.x < absPen.y && absPen.x < absPen.z)
+			pos.x += penetration.x;
+		else if (absPen.y < absPen.z)
+			pos.y += penetration.y;
+		else
+			pos.z += penetration.z;
+
+		positionBufferWrite[index] = pos;
+	}
+}
+
+void InterlockedAddInt3(int index, float3 value, float weight)
+{
+	int3 ivalue = (int3) (value * weight);
+	InterlockedAdd(intNormalBuffer[index].x, ivalue.x);
+	InterlockedAdd(intNormalBuffer[index].y, ivalue.y);
+	InterlockedAdd(intNormalBuffer[index].z, ivalue.z);
+}
+
+[numthreads(THREAD_SIZE, THREAD_SIZE, 1)]
+void GenerateMesh(uint3 id : SV_DispatchThreadID)
+{
+	if ((int) id.x >= resolutionX || (int) id.y >= resolutionY)
+		return;
+	
+	int vertIndex = id.x + id.y * (resolutionX);
+	intNormalBuffer[vertIndex] = 0;
+
+	if ((int)id.x >= resolutionX - 1 || (int) id.y >= resolutionY - 1)
+		return;
+	
+	int indIndex = id.x + id.y * (resolutionX-1);
+	int triangleIndex = indIndex * 6;
+	
+	indicesBuffer[triangleIndex] = vertIndex;
+	indicesBuffer[triangleIndex + 1] = vertIndex + resolutionX;
+	indicesBuffer[triangleIndex + 2] = vertIndex + 1;
+	indicesBuffer[triangleIndex + 3] = vertIndex + 1;
+	indicesBuffer[triangleIndex + 4] = vertIndex + resolutionX;
+	indicesBuffer[triangleIndex + 5] = vertIndex + resolutionX + 1;
+}
+
+[numthreads(THREAD_SIZE, THREAD_SIZE, 1)]
+void ComputeNormal(uint3 id : SV_DispatchThreadID)
+{
+	if ((int) id.x >= resolutionX - 1 || (int) id.y >= resolutionY - 1)
+		return;
+	
+	int vertexIndex = id.x + id.y * resolutionX;
+	
+	float3 edge1 = positionBufferRead[vertexIndex + resolutionX] - positionBufferRead[vertexIndex];
+	float3 edge2 = positionBufferRead[vertexIndex + 1] - positionBufferRead[vertexIndex];
+	float3 faceNormal = normalize(cross(edge1, edge2));
+
+	InterlockedAddInt3(vertexIndex, faceNormal, 100);
+	InterlockedAddInt3(vertexIndex + resolutionX, faceNormal, 100);
+	InterlockedAddInt3(vertexIndex + 1, faceNormal, 100);
+	
+	edge1 = positionBufferRead[vertexIndex + resolutionX] - positionBufferRead[vertexIndex + 1];
+	edge2 = positionBufferRead[vertexIndex + resolutionX + 1] - positionBufferRead[vertexIndex + 1];
+	faceNormal = normalize(cross(edge1, edge2));
+	
+	InterlockedAddInt3(vertexIndex + 1, faceNormal, 100);
+	InterlockedAddInt3(vertexIndex + resolutionX, faceNormal, 100);
+	InterlockedAddInt3(vertexIndex + resolutionX + 1, faceNormal, 100);
+}
+
+[numthreads(THREAD_SIZE, THREAD_SIZE, 1)]
+void NormalizeNormal(uint3 id : SV_DispatchThreadID)
+{
+	if ((int) id.x >= resolutionX || (int) id.y > resolutionY)
+		return;
+	
+	int index = id.x + id.y * resolutionX;
+	float3 normal = (float3) intNormalBuffer[index];
+	float sqrMag = dot(normal, normal);
+	
+	normalBuffer[index] = sqrMag > 0.001f ? normal / sqrt(sqrMag) : 0;
+}
